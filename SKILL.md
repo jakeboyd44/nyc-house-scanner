@@ -13,31 +13,53 @@ Scan event listing sites for house/tech house events in NYC. Filter against your
 
 ## Setup
 
-1. Copy `references/taste-profile.md` and customize with your artists, venues, and promoters
+1. Edit `references/taste-profile.md` with your artists, venues, and promoters
 2. Replace `YOUR_PHONE_NUMBER` in the messaging section with your iMessage number (E.164 format)
 3. Create the state file: `~/clawd/memory/nyc-house-scanner-state.json` with `{"alerted_events": [], "last_scan": null}`
 4. Add cron jobs (see bottom of this file)
 
+## Important: Browser Required
+
+Most event sites (Shotgun, RA, DICE) block curl/WebFetch with bot protection (Vercel checkpoint, Cloudflare CAPTCHA) or render events client-side via JavaScript. **You must use browser automation to scrape them.**
+
+If your OpenClaw instance has browser control (CDP), use it:
+
+```bash
+# 1. Start browser via control endpoint
+curl -s -X POST -H "Authorization: Bearer $GATEWAY_TOKEN" http://127.0.0.1:18791/start
+
+# 2. Connect to CDP at http://127.0.0.1:18800
+#    Navigate to each source, wait 6-8s for JS to render,
+#    extract text via Runtime.evaluate({ expression: "document.body.innerText" })
+
+# 3. Stop browser when done
+curl -s -X POST -H "Authorization: Bearer $GATEWAY_TOKEN" http://127.0.0.1:18791/stop
+```
+
+### Cron session requirements
+
+**Isolated cron sessions (`--session isolated`) cannot run this skill** — they have no web access and a read-only filesystem. Use `--session main` for cron jobs. Main session jobs fire as system events that your agent processes when awake.
+
 ## Sources (check in this order)
 
 1. **Shotgun** — `https://shotgun.live/en/cities/new-york/house`
-   - Raw Cuts and underground promoters post here first
+   - Underground promoters post here first
    - Also check: `https://shotgun.live/en/cities/new-york/techno` (crossover acts)
-2. **Resident Advisor** — `https://ra.co/events/us/newyorkcity?genres=house&genres=techhouse`
-3. **DICE** — `https://dice.fm/browse/new-york/music/electronic`
+   - Requires browser (Vercel bot protection)
+2. **Resident Advisor** — `https://ra.co/events/us/newyorkcity`
+   - Don't add genre params to URL — filter results after fetching
+   - Requires browser (Cloudflare CAPTCHA)
+3. **DICE** — `https://dice.fm/browse/new-york`
    - Brooklyn Mirage / Avant Gardner tickets are DICE-exclusive
-   - Good for popup events
+   - Requires browser (JS SPA, `/music/electronic` subpath may 404 — use base browse URL)
 4. **Edmtrain** — `https://edmtrain.com/new-york-city-ny`
-5. **doNYC** — `https://www.donyc.com/genres/house`
-   - NYC-specific aggregator, good catch-all
-6. **Bandsintown** — `https://www.bandsintown.com/c/new-york-ny?genre=electronic`
+   - "Recently Added" section at bottom has newest listings
+   - Requires browser (events loaded via JS)
+5. **Bandsintown** — `https://www.bandsintown.com/c/new-york-ny?genre=electronic`
    - Best for tracking specific artists' tour dates hitting NYC
-7. **Songkick** — `https://www.songkick.com/metro-areas/7644-us-new-york-nyc/genre/electronic`
+6. **Songkick** — `https://www.songkick.com/metro-areas/7644-us-new-york-nyc/genre/electronic`
 
-For each source, use WebFetch with a prompt like:
-```
-List all upcoming events. For each event return: artist/lineup, venue, date, time, ticket link, price if shown, and promoter/collective if listed. Format as JSON array.
-```
+For each source, navigate via browser, wait for page load, extract `document.body.innerText`, then parse for event details.
 
 If a source fails or returns nothing useful, skip it and move on. Don't retry.
 
@@ -91,6 +113,8 @@ Schema:
 
 Use `imsg send --to "YOUR_PHONE_NUMBER"` to send alerts.
 
+**Keep messages short.** iMessage/AppleScript times out on long texts. Split summaries into multiple messages if >10 events. Max ~15 lines per message.
+
 ### Tier 1 format (send immediately):
 ```bash
 imsg send --to "YOUR_PHONE_NUMBER" --text "🔥 [ARTIST] at [VENUE]
@@ -103,13 +127,12 @@ Tickets: [LINK]
 ```bash
 imsg send --to "YOUR_PHONE_NUMBER" --text "📍 NYC House Radar — [DATE]
 
-[N] new events found:
-
+THIS WEEK:
 1. [Artist] — [Venue] — [Date]
-2. [Artist] — [Venue] — [Date]
-
-[Note about top promoters if nothing new from them]"
+2. [Artist] — [Venue] — [Date]"
 ```
+
+Send a second message for "COMING UP" events if the list is long.
 
 ### Nothing new — Don't text. Silent run.
 
@@ -121,7 +144,7 @@ When a Tier 1 event is found that the user is likely attending (named artist + g
 imsg send --to "YOUR_PHONE_NUMBER" --text "🚬 Don't forget to order cigs on DoorDash before [ARTIST] tonight"
 ```
 
-Send this as a separate text ~4 hours before the event start time. If the event is tonight and it's already within 4 hours, send immediately after the Tier 1 alert.
+Send ~4 hours before event start. If already within 4 hours, send immediately after the Tier 1 alert.
 
 ## Edge Cases
 
@@ -132,20 +155,22 @@ Send this as a separate text ~4 hours before the event start time. If the event 
 
 ## Run Procedure
 
-1. Read `~/clawd/memory/nyc-house-scanner-state.json` (create with empty schema if missing)
+1. Read state file (create with empty schema if missing)
 2. Read `references/taste-profile.md` for current filtering criteria
-3. Fetch each source via WebFetch, extract events
-4. Filter events against taste profile
-5. Dedup against state file
-6. Send Tier 1 alerts immediately via iMessage
-7. If 9am run: compile Tier 2 into daily summary, send if non-empty
-8. If 6pm run: only send Tier 1 alerts (no summary)
-9. Update state file with newly alerted events
-10. Prune entries older than 7 days past event date
+3. Start browser via control endpoint (auth required)
+4. Connect to CDP, navigate to each source, wait 6-8s, extract page text
+5. Stop browser when done scraping
+6. Parse and filter events against taste profile
+7. Dedup against state file
+8. Send Tier 1 alerts immediately via iMessage
+9. If 9am run: compile Tier 2 into daily summary, send if non-empty (split long messages)
+10. If 6pm run: only send Tier 1 alerts (no summary)
+11. Update state file with newly alerted events
+12. Prune entries older than 7 days past event date
 
 ## Cron Setup
 
-Add two cron jobs via OpenClaw CLI:
+**Must use `--session main`** — isolated sessions lack web tools. See "Important: Browser Required" above.
 
 ```bash
 # Morning scan — Tier 1 alerts + daily summary
@@ -153,24 +178,16 @@ openclaw cron add \
   --name "nyc-house-scanner:morning" \
   --cron "0 9 * * *" \
   --tz "America/New_York" \
-  --session isolated \
-  --model codex \
-  --message "Run the nyc-house-scanner skill. This is the 9am morning scan — send both Tier 1 immediate alerts AND the Tier 2 daily summary." \
-  --announce \
-  --channel imessage \
-  --to "YOUR_PHONE_NUMBER" \
-  --timeout-seconds 300
+  --session main \
+  --system-event "Run the nyc-house-scanner skill. This is the 9am morning scan — send both Tier 1 immediate alerts AND the Tier 2 daily summary. Use browser control (CDP) to scrape sources." \
+  --timeout-seconds 600
 
 # Evening scan — Tier 1 alerts only
 openclaw cron add \
   --name "nyc-house-scanner:evening" \
   --cron "0 18 * * *" \
   --tz "America/New_York" \
-  --session isolated \
-  --model codex \
-  --message "Run the nyc-house-scanner skill. This is the 6pm evening scan — send Tier 1 immediate alerts ONLY (no daily summary)." \
-  --announce \
-  --channel imessage \
-  --to "YOUR_PHONE_NUMBER" \
-  --timeout-seconds 300
+  --session main \
+  --system-event "Run the nyc-house-scanner skill. This is the 6pm evening scan — send Tier 1 immediate alerts ONLY (no daily summary). Use browser control (CDP) to scrape sources." \
+  --timeout-seconds 600
 ```
